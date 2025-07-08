@@ -1,22 +1,24 @@
 import sys
 import random
 import os
-from PyQt6.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QPushButton, QLabel, QStackedWidget
+import json
+from PyQt6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QPushButton,
+    QLabel, QStackedWidget, QComboBox, QCheckBox
+)
 from PyQt6.QtGui import QPainter, QColor, QBrush, QPen, QPixmap, QFont
-from PyQt6.QtCore import Qt, QTimer, QRect, pyqtSignal, QSize
+from PyQt6.QtCore import Qt, QTimer, QRect, pyqtSignal, QSize, QUrl
+from PyQt6.QtMultimedia import QSoundEffect
 
 SCREEN_WIDTH = 800
 SCREEN_HEIGHT = 700
 FPS = 60
-
 
 LEVEL_SETTINGS = {
     'Легкий': {'speed_min': 5, 'speed_max': 8, 'spawn_rate': 60},
     'Средний': {'speed_min': 8, 'speed_max': 12, 'spawn_rate': 40},
     'Сложный': {'speed_min': 12, 'speed_max': 18, 'spawn_rate': 25}
 }
-
-
 
 class Enemy:
     def __init__(self, image, level_conf):
@@ -32,8 +34,6 @@ class Enemy:
     def update(self):
         self.rect.moveTop(self.rect.top() + self.speed)
 
-
-
 class GameWidget(QWidget):
     gameOver = pyqtSignal(int)
 
@@ -41,26 +41,29 @@ class GameWidget(QWidget):
         super().__init__()
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.load_assets()
-
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_game)
         self.keys_pressed = set()
+        self.auto_accelerate = False
 
     def load_assets(self):
-        self.player_image = self.load_pixmap(os.path.join('assets', 'images', 'player_car.png'), (50, 100),
-                                             QColor("blue"))
+        self.player_image = self.load_pixmap(os.path.join('assets', 'images', 'player_car.png'), (50, 100), QColor("blue"))
         self.enemy_images = [
             self.load_pixmap(os.path.join('assets', 'images', 'enemy_car_1.png'), (50, 100), QColor("red")),
             self.load_pixmap(os.path.join('assets', 'images', 'enemy_car_2.png'), (50, 100), QColor("green"))
         ]
-        self.road_image = self.load_pixmap(os.path.join('assets', 'images', 'road.png'), (SCREEN_WIDTH, SCREEN_HEIGHT),
-                                           QColor(100, 100, 100))
+        self.road_image = self.load_pixmap(os.path.join('assets', 'images', 'road.png'), (SCREEN_WIDTH, SCREEN_HEIGHT), QColor(100, 100, 100))
+        self.gas_sound = QSoundEffect()
+        self.gas_sound.setSource(QUrl.fromLocalFile('assets/sounds/gas.wav'))
+        self.brake_sound = QSoundEffect()
+        self.brake_sound.setSource(QUrl.fromLocalFile('assets/sounds/brake.wav'))
+        self.horn_sound = QSoundEffect()
+        self.horn_sound.setSource(QUrl.fromLocalFile('assets/sounds/horn.wav'))
 
     def load_pixmap(self, path, size, fallback_color):
         if os.path.exists(path):
             pixmap = QPixmap(path)
-            return pixmap.scaled(QSize(*size), Qt.AspectRatioMode.KeepAspectRatio,
-                                 Qt.TransformationMode.SmoothTransformation)
+            return pixmap.scaled(QSize(*size), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
         else:
             print(f"Warning: Asset not found at {path}. Using fallback color.")
             pixmap = QPixmap(QSize(*size))
@@ -68,10 +71,10 @@ class GameWidget(QWidget):
             return pixmap
 
     def start_game(self, level_name):
-    
         self.level_name = level_name
         self.current_level_settings = LEVEL_SETTINGS[level_name]
         self.score = 0
+        self.distance = 0
         self.game_running = True
 
         self.player_rect = QRect(
@@ -81,17 +84,21 @@ class GameWidget(QWidget):
             self.player_image.height()
         )
         self.player_speed = 8
-
         self.enemies = []
         self.enemy_timer = 0
         self.road_offset_y = 0
-
         self.keys_pressed.clear()
         self.timer.start(1000 // FPS)
         self.setFocus()
 
     def keyPressEvent(self, event):
         self.keys_pressed.add(event.key())
+        if event.key() == Qt.Key.Key_Up:
+            self.gas_sound.play()
+        elif event.key() == Qt.Key.Key_Down:
+            self.brake_sound.play()
+        elif event.key() == Qt.Key.Key_Space:
+            self.horn_sound.play()
 
     def keyReleaseEvent(self, event):
         self.keys_pressed.discard(event.key())
@@ -100,17 +107,18 @@ class GameWidget(QWidget):
         if not self.game_running:
             return
 
-        # Движение игрока
         if (Qt.Key.Key_Left in self.keys_pressed or Qt.Key.Key_A in self.keys_pressed) and self.player_rect.left() > 0:
             self.player_rect.moveLeft(self.player_rect.left() - self.player_speed)
-        if (
-                Qt.Key.Key_Right in self.keys_pressed or Qt.Key.Key_D in self.keys_pressed) and self.player_rect.right() < self.width():
+        if (Qt.Key.Key_Right in self.keys_pressed or Qt.Key.Key_D in self.keys_pressed) and self.player_rect.right() < self.width():
             self.player_rect.moveRight(self.player_rect.right() + self.player_speed)
 
-        # Прокрутка дороги
-        self.road_offset_y = (self.road_offset_y + self.current_level_settings['speed_min']) % self.height()
+        if self.auto_accelerate or Qt.Key.Key_Up in self.keys_pressed:
+            self.road_offset_y = (self.road_offset_y + self.current_level_settings['speed_max']) % self.height()
+        elif Qt.Key.Key_Down in self.keys_pressed:
+            self.road_offset_y = (self.road_offset_y + self.current_level_settings['speed_min'] // 2) % self.height()
+        else:
+            self.road_offset_y = (self.road_offset_y + self.current_level_settings['speed_min']) % self.height()
 
-        # Создание и обновление врагов
         self.enemy_timer += 1
         if self.enemy_timer > self.current_level_settings['spawn_rate']:
             self.enemy_timer = 0
@@ -121,42 +129,48 @@ class GameWidget(QWidget):
             enemy.update()
             if enemy.rect.top() > self.height():
                 self.enemies.remove(enemy)
-                self.score += 1
+                self.score += 5
             if self.player_rect.intersects(enemy.rect):
                 self.end_game()
                 return
 
-        self.update()  # Запрос на перерисовку виджета
+        self.distance += 1
+        self.score += 1
+        self.update()
 
     def end_game(self):
         self.game_running = False
         self.timer.stop()
+        self.save_score(self.score)
         self.gameOver.emit(self.score)
+
+    def save_score(self, score):
+        scores_file = "scores.json"
+        scores = []
+        if os.path.exists(scores_file):
+            with open(scores_file, 'r') as f:
+                scores = json.load(f)
+        scores.append(score)
+        scores = sorted(scores, reverse=True)[:10]
+        with open(scores_file, 'w') as f:
+            json.dump(scores, f)
 
     def paintEvent(self, event):
         painter = QPainter(self)
-
-        # Рисуем дорогу (2 копии для бесшовной прокрутки)
         painter.drawPixmap(0, self.road_offset_y, self.road_image)
         painter.drawPixmap(0, self.road_offset_y - self.height(), self.road_image)
-
-        # Рисуем игрока
         painter.drawPixmap(self.player_rect, self.player_image)
-
-        # Рисуем врагов
         for enemy in self.enemies:
             painter.drawPixmap(enemy.rect, enemy.image)
 
-        # Рисуем интерфейс (счет, уровень)
         painter.setPen(QColor("white"))
         painter.setFont(QFont("Arial", 16, QFont.Weight.Bold))
         painter.drawText(20, 40, f"Счет: {self.score}")
         painter.drawText(self.width() - 150, 40, f"Уровень: {self.level_name}")
-
+        painter.drawText(self.width() - 200, 70, f"Скорость: {self.current_level_settings['speed_min']} км/ч")
+        painter.drawText(self.width() - 200, 100, f"Дистанция: {self.distance} м")
         painter.end()
 
-
-# --- Классы для виджетов меню ---
 class BaseMenuWidget(QWidget):
     def __init__(self):
         super().__init__()
@@ -165,14 +179,13 @@ class BaseMenuWidget(QWidget):
         self.layout.setSpacing(20)
         self.setStyleSheet("""
             BaseMenuWidget { background-color: #2c3e50; }
-            QPushButton { 
-                background-color: #3498db; color: white; font-size: 24px; 
+            QPushButton {
+                background-color: #3498db; color: white; font-size: 24px;
                 padding: 15px; border-radius: 10px; border: 2px solid #2980b9;
             }
             QPushButton:hover { background-color: #5dade2; }
             QLabel { color: white; font-size: 48px; font-weight: bold; }
         """)
-
 
 class MainMenuWidget(BaseMenuWidget):
     startGame = pyqtSignal()
@@ -190,7 +203,6 @@ class MainMenuWidget(BaseMenuWidget):
         self.layout.addWidget(start_button)
         self.layout.addWidget(exit_button)
 
-
 class LevelSelectWidget(BaseMenuWidget):
     levelSelected = pyqtSignal(str)
 
@@ -203,7 +215,6 @@ class LevelSelectWidget(BaseMenuWidget):
             btn = QPushButton(level_name)
             btn.clicked.connect(lambda checked, name=level_name: self.levelSelected.emit(name))
             self.layout.addWidget(btn)
-
 
 class GameOverWidget(BaseMenuWidget):
     restartGame = pyqtSignal()
@@ -228,8 +239,6 @@ class GameOverWidget(BaseMenuWidget):
     def set_score(self, score):
         self.score_label.setText(f"Ваш итоговый счет: {score}")
 
-
-# --- Главное окно приложения ---
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -249,7 +258,6 @@ class MainWindow(QMainWindow):
         self.stacked_widget.addWidget(self.game_widget)
         self.stacked_widget.addWidget(self.game_over_widget)
 
-        # Соединяем сигналы и слоты для навигации по приложению
         self.main_menu.startGame.connect(self.show_level_select)
         self.level_select.levelSelected.connect(self.start_game)
         self.game_widget.gameOver.connect(self.show_game_over)
@@ -271,7 +279,6 @@ class MainWindow(QMainWindow):
     def show_game_over(self, score):
         self.game_over_widget.set_score(score)
         self.stacked_widget.setCurrentWidget(self.game_over_widget)
-
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
